@@ -5,45 +5,53 @@ let playerColor = 'white'; // 'white' or 'black'
 let currentRoom = '';
 let isMyTurn = false;
 let isConnected = false;
+let isRegistered = false;
+let playerId = '';
+let playerName = '';
+let incomingChallengeId = '';
 let tapSquare = null; // Stores the square of the currently selected piece for tap-to-move
 
-// Connect to WebSocket server
+// Connect only to the configured test backend (never silently fall back to the live Render server).
 function connectToServer() {
-    try {
-        const wsUrl = 'wss://chessify1-server.onrender.com';
-
-        ws = new WebSocket(wsUrl);
-
-        ws.onopen = () => {
-            console.log('Connected to server');
-            isConnected = true;
-            // ENABLE buttons ONLY when connected
-            $('#createRoom, #joinRoom').prop('disabled', false);
-            showStatus('Connected to server', 'success');
-        };
-
-        ws.onmessage = (event) => {
-            const data = JSON.parse(event.data);
-            console.log('Received:', data);
-            handleServerMessage(data);
-        };
-
-        ws.onclose = () => {
-            console.log('Disconnected from server');
-            isConnected = false;
-            // DISABLE buttons when disconnected
-            $('#createRoom, #joinRoom').prop('disabled', true);
-            showError('Connection lost. Please refresh the page to reconnect.');
-        };
-
-        ws.onerror = (error) => {
-            console.error('WebSocket error:', error);
-            showError('Connection error. Please check if the server is running.');
-        };
-    } catch (error) {
-        console.error('Connection error:', error);
-        showError('Failed to connect to server. Please check if the server is running.');
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+    const params = new URLSearchParams(window.location.search);
+    const localHost = ['localhost', '127.0.0.1'].includes(window.location.hostname);
+    const configuredUrl = window.CHESSIFY_WS_URL || params.get('ws') || (localHost ? 'ws://localhost:3000' : '');
+    if (!configuredUrl) {
+        showError('Test lobby backend is not configured. Set CHESSIFY_WS_URL in lobby-config.js after deploying the test backend.');
+        return;
     }
+    let parsedUrl;
+    try { parsedUrl = new URL(configuredUrl); } catch (e) {
+        showError('Invalid WebSocket URL. Use ws:// locally or wss:// for the deployed backend.');
+        return;
+    }
+    if (!['ws:', 'wss:'].includes(parsedUrl.protocol)) {
+        showError('Invalid WebSocket URL. Use ws:// locally or wss:// for the deployed backend.');
+        return;
+    }
+
+    ws = new WebSocket(parsedUrl.toString());
+    ws.onopen = () => {
+        console.log('Connected to Chessify test lobby');
+        isConnected = true;
+        $('#enterLobby').prop('disabled', false);
+        showStatus('Connected. Enter your display name to join the lobby.', 'success');
+    };
+    ws.onmessage = (event) => {
+        try { handleServerMessage(JSON.parse(event.data)); }
+        catch (error) { console.error('Invalid server message:', error); }
+    };
+    ws.onclose = () => {
+        isConnected = false;
+        isRegistered = false;
+        $('#enterLobby, #createRoom, #joinRoom').prop('disabled', true);
+        showError('Connection lost. Refresh the page to reconnect to the test server.');
+    };
+    ws.onerror = (error) => {
+        console.error('WebSocket error:', error);
+        showError('Could not connect to the configured test backend.');
+    };
 }
 
 // Show status message
@@ -62,6 +70,35 @@ function handleServerMessage(data) {
     try {
         console.log('Handling message:', data);
         switch (data.type) {
+            case 'player_registered':
+                isRegistered = true;
+                playerId = data.playerId;
+                playerName = data.name;
+                $('#playerName').val(playerName);
+                $('#enterLobby').text('Joined as ' + playerName).prop('disabled', true);
+                $('#createRoom, #joinRoom').prop('disabled', false);
+                $('#lobbyIdentity').text('Online as ' + playerName);
+                showStatus('You are in the lobby. Challenge a player or create/join a room.', 'success');
+                break;
+            case 'player_list':
+                renderLobbyPlayers(data.players || []);
+                break;
+            case 'incoming_challenge':
+                incomingChallengeId = data.challengeId;
+                $('#incomingChallengeName').text(data.fromName || 'A player');
+                $('#incomingChallenge').prop('hidden', false);
+                break;
+            case 'challenge_sent':
+                showStatus('Challenge sent to ' + (data.targetName || 'player') + '. Waiting for a response…', 'info');
+                break;
+            case 'challenge_declined':
+                $('#incomingChallenge').prop('hidden', true);
+                showStatus(data.message || 'Challenge declined.', 'warning');
+                break;
+            case 'challenge_expired':
+                $('#incomingChallenge').prop('hidden', true);
+                showStatus(data.message || 'Challenge expired.', 'warning');
+                break;
             case 'room_created':
                 handleRoomCreated(data);
                 break;
@@ -421,9 +458,40 @@ function handleDrawResponse(data) {
 function addChatMessage(message, sender) {
     const $chatBox = $('#chatBox');
     const $message = $('<div>').addClass('chat-message');
-    $message.html(`<strong>${sender}:</strong> ${message}`);
+    $('<strong>').text(String(sender || 'Player') + ': ').appendTo($message);
+    $message.append(document.createTextNode(String(message || '')));
     $chatBox.append($message);
-    $chatBox.scrollTop($chatBox[0].scrollHeight); // Scroll to bottom
+    $chatBox.scrollTop($chatBox[0].scrollHeight);
+}
+
+// Render both lobby lists using text nodes so display names cannot inject HTML.
+function renderLobbyPlayers(players) {
+    ['#lobbyPlayersStart', '#lobbyPlayersGame'].forEach(function (selector) {
+        const $list = $(selector);
+        if (!$list.length) return;
+        $list.empty();
+        if (!players.length) {
+            $('<div>').addClass('lobby-empty').text('No other players online yet.').appendTo($list);
+            return;
+        }
+        players.forEach(function (player) {
+            const $row = $('<div>').addClass('lobby-player');
+            const $details = $('<div>').addClass('lobby-player-details');
+            $('<span>').addClass('lobby-dot' + (player.available ? ' is-online' : ' is-busy')).appendTo($details);
+            $('<span>').addClass('lobby-player-name').text(player.name + (player.isSelf ? ' (you)' : '')).appendTo($details);
+            $('<span>').addClass('lobby-player-state').text(player.isSelf ? 'You' : (player.available ? 'Available' : 'In a room')).appendTo($details);
+            $row.append($details);
+            if (!player.isSelf) {
+                $('<button>').addClass('btn btn-sm btn-outline-info lobby-challenge')
+                    .attr('type', 'button')
+                    .attr('data-player-id', player.playerId)
+                    .text('Challenge')
+                    .prop('disabled', !isRegistered || !player.available || Boolean(currentRoom))
+                    .appendTo($row);
+            }
+            $list.append($row);
+        });
+    });
 }
 
 // Enable game controls
@@ -440,12 +508,37 @@ function disableGameControls() {
 
 // Event listeners
 $(document).ready(() => {
-    // DO NOT initialize board here. It will be initialized when #gameArea becomes visible.
-    board = null; // Ensure board is explicitly null on page load
-    $('#createRoom, #joinRoom').prop('disabled', true); // Start disabled
-
-    // Connect to server when page loads (this will enable buttons on open)
+    board = null;
+    $('#enterLobby, #createRoom, #joinRoom').prop('disabled', true);
+    $('#chatInput, #sendChat').prop('disabled', true);
     connectToServer();
+
+    $('#enterLobby').click(() => {
+        if (!isConnected) return showError('Not connected to the test lobby server.');
+        const name = String($('#playerName').val() || '').trim().replace(/\\s+/g, ' ');
+        if (name.length < 2 || name.length > 20) return showError('Enter a display name between 2 and 20 characters.');
+        if (isRegistered) return;
+        ws.send(JSON.stringify({ type: 'register_player', name: name }));
+        $('#enterLobby').prop('disabled', true).text('Joining…');
+    });
+
+    $('#acceptChallenge').click(() => {
+        if (!incomingChallengeId || !isConnected) return;
+        ws.send(JSON.stringify({ type: 'accept_challenge', challengeId: incomingChallengeId }));
+        $('#incomingChallenge').prop('hidden', true);
+        incomingChallengeId = '';
+    });
+    $('#declineChallenge').click(() => {
+        if (!incomingChallengeId || !isConnected) return;
+        ws.send(JSON.stringify({ type: 'decline_challenge', challengeId: incomingChallengeId }));
+        $('#incomingChallenge').prop('hidden', true);
+        incomingChallengeId = '';
+    });
+    $('#lobbyPlayersStart, #lobbyPlayersGame').on('click', '.lobby-challenge', function () {
+        const targetPlayerId = $(this).attr('data-player-id');
+        if (!targetPlayerId || !isRegistered || !isConnected || currentRoom) return;
+        ws.send(JSON.stringify({ type: 'challenge_player', targetPlayerId: targetPlayerId }));
+    });
 
     // Create room button click handler
     $('#createRoom').click(() => {
@@ -519,14 +612,14 @@ $(document).ready(() => {
     $('#sendChat').click(() => {
         const chatInput = $('#chatInput');
         const message = chatInput.val().trim();
-        if (message && isConnected && currentRoom) {
+        if (message && isConnected && isRegistered && currentRoom) {
             ws.send(JSON.stringify({
                 type: 'chat_message',
                 roomId: currentRoom,
                 message: message,
-                sender: playerColor // Or player's username if you add one
+                sender: playerName || playerColor
             }));
-            addChatMessage(message, 'You'); // Display your own message instantly
+            addChatMessage(message, 'You'); // Display locally; server sends it only to the opponent
             chatInput.val(''); // Clear input
         }
     });

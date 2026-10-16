@@ -1,44 +1,136 @@
-
 const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
 const path = require('path');
+const crypto = require('crypto');
 
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
-
-// Serve static files
 app.use(express.static(path.join(__dirname)));
 
-// Store active game rooms
 const gameRooms = new Map();
+const onlinePlayers = new Map();
+const challenges = new Map();
+const CHALLENGE_TIMEOUT_MS = 30000;
+const START_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
 
-// Log active rooms
-function logRooms() {
-    console.log('\nActive Rooms:');
-    gameRooms.forEach((room, roomId) => {
-        console.log(`Room ${roomId}:`);
-        console.log('- White player:', room.white ? 'Connected' : 'Empty');
-        console.log('- Black player:', room.black ? 'Connected' : 'Empty');
-        console.log('- Spectators:', room.spectators.length);
+function send(ws, payload) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(payload));
+    }
+}
+
+function sendError(ws, message) {
+    send(ws, { type: 'error', message: message });
+}
+
+function isRegistered(ws) {
+    return Boolean(ws.playerId && onlinePlayers.has(ws.playerId));
+}
+
+function playerIsBusy(ws) {
+    return Boolean(ws.roomId || ws.isSpectator);
+}
+
+function broadcastPlayerList() {
+    const players = Array.from(onlinePlayers.values()).map(function (player) {
+        return {
+            playerId: player.id,
+            name: player.name,
+            available: !playerBusy(player.ws),
+            inRoom: Boolean(player.ws.roomId),
+            isSelf: false
+        };
+    });
+    onlinePlayers.forEach(function (player) {
+        send(player.ws, {
+            type: 'player_list',
+            players: players.map(function (entry) {
+                return Object.assign({}, entry, { isSelf: entry.playerId === player.id });
+            })
+        });
     });
 }
 
-wss.on('connection', (ws) => {
+function playerBusy(ws) {
+    return Boolean(ws.roomId || ws.isSpectator);
+}
+
+function findPendingChallengeFor(playerId) {
+    for (const challenge of challenges.values()) {
+        if (challenge.fromId === playerId || challenge.toId === playerId) return challenge;
+    }
+    return null;
+}
+
+function removeChallenge(challengeId, notifyType, message) {
+    const challenge = challenges.get(challengeId);
+    if (!challenge) return;
+    clearTimeout(challenge.timer);
+    challenges.delete(challengeId);
+    if (notifyType) {
+        send(challenge.fromWs, { type: notifyType, challengeId: challengeId, message: message || '' });
+        send(challenge.toWs, { type: notifyType, challengeId: challengeId, message: message || '' });
+    }
+}
+
+function makeRoomId() {
+    let id;
+    do {
+        id = crypto.randomBytes(3).toString('hex').toUpperCase();
+    } while (gameRooms.has(id));
+    return id;
+}
+
+function startChallengeMatch(challenge) {
+    const roomId = makeRoomId();
+    const room = {
+        white: challenge.fromWs,
+        black: challenge.toWs,
+        spectators: [],
+        gameState: { fen: START_FEN, moves: [] }
+    };
+    gameRooms.set(roomId, room);
+
+    challenge.fromWs.roomId = roomId;
+    challenge.fromWs.color = 'white';
+    challenge.fromWs.isSpectator = false;
+    challenge.toWs.roomId = roomId;
+    challenge.toWs.color = 'black';
+    challenge.toWs.isSpectator = false;
+
+    send(challenge.fromWs, { type: 'game_start', roomId: roomId, color: 'white', fen: START_FEN, opponent: challenge.toWs.playerName });
+    send(challenge.toWs, { type: 'game_start', roomId: roomId, color: 'black', fen: START_FEN, opponent: challenge.fromWs.playerName });
+    broadcastPlayerList();
+}
+
+wss.on('connection', function (ws) {
     console.log('New client connected');
-    
-    ws.on('message', (message) => {
+
+    ws.on('message', function (rawMessage) {
         try {
-            const data = JSON.parse(message);
-            console.log('Received:', data);
-            
-            switch(data.type) {
+            const data = JSON.parse(rawMessage.toString());
+            if (!data || typeof data.type !== 'string') return sendError(ws, 'Invalid message.');
+
+            switch (data.type) {
+                case 'register_player':
+                    handleRegisterPlayer(ws, data);
+                    break;
                 case 'create_room':
                     handleCreateRoom(ws, data);
                     break;
                 case 'join_room':
                     handleJoinRoom(ws, data);
+                    break;
+                case 'challenge_player':
+                    handleChallengePlayer(ws, data);
+                    break;
+                case 'accept_challenge':
+                    handleAcceptChallenge(ws, data);
+                    break;
+                case 'decline_challenge':
+                    handleDeclineChallenge(ws, data);
                     break;
                 case 'make_move':
                     handleMove(ws, data);
@@ -46,193 +138,257 @@ wss.on('connection', (ws) => {
                 case 'game_over':
                     handleGameOver(ws, data);
                     break;
+                case 'chat_message':
+                    handleChatMessage(ws, data);
+                    break;
+                case 'offer_draw':
+                    handleOfferDraw(ws, data);
+                    break;
+                case 'draw_response':
+                    handleDrawResponse(ws, data);
+                    break;
                 default:
-                    console.log('Unknown message type:', data.type);
+                    sendError(ws, 'Unsupported message type.');
             }
-            
-            // Log rooms after each action
-            logRooms();
-            
         } catch (error) {
-            console.error('Error processing message:', error);
-            ws.send(JSON.stringify({
-                type: 'error',
-                message: 'Server error: ' + error.message
-            }));
+            console.error('Error processing WebSocket message:', error);
+            sendError(ws, 'Could not process that request.');
         }
     });
-    
-    ws.on('close', () => {
+
+    ws.on('close', function () {
         handlePlayerDisconnect(ws);
         console.log('Client disconnected');
-        logRooms();
     });
-    
-    ws.on('error', (error) => {
+    ws.on('error', function (error) {
         console.error('WebSocket error:', error);
     });
 });
 
-function handleCreateRoom(ws, data) {
-    const roomId = data.roomId;
-    console.log('Creating room:', roomId);
-    
-    if (gameRooms.has(roomId)) {
-        console.log('Room already exists:', roomId);
-        ws.send(JSON.stringify({
-            type: 'error',
-            message: 'Room already exists'
-        }));
-        return;
+function handleRegisterPlayer(ws, data) {
+    const name = typeof data.name === 'string' ? data.name.trim().replace(/\s+/g, ' ') : '';
+    if (name.length < 2 || name.length > 20) {
+        return sendError(ws, 'Enter a name between 2 and 20 characters.');
     }
-    
+    if (ws.playerId && onlinePlayers.has(ws.playerId)) {
+        const existing = onlinePlayers.get(ws.playerId);
+        existing.name = name;
+        ws.playerName = name;
+        send(ws, { type: 'player_registered', playerId: ws.playerId, name: name });
+        return broadcastPlayerList();
+    }
+
+    ws.playerId = crypto.randomBytes(16).toString('hex');
+    ws.playerName = name;
+    onlinePlayers.set(ws.playerId, { id: ws.playerId, name: name, ws: ws });
+    send(ws, { type: 'player_registered', playerId: ws.playerId, name: name });
+    broadcastPlayerList();
+}
+
+function handleCreateRoom(ws, data) {
+    if (!isRegistered(ws)) return sendError(ws, 'Enter the lobby with your name first.');
+    if (playerBusy(ws)) return sendError(ws, 'Leave your current room before creating another.');
+    const roomId = typeof data.roomId === 'string' ? data.roomId.trim().toUpperCase() : '';
+    if (!/^[A-Z0-9]{3,12}$/.test(roomId)) return sendError(ws, 'Room IDs must be 3–12 letters or numbers.');
+    if (gameRooms.has(roomId)) return sendError(ws, 'Room already exists. Choose another room ID.');
+
     gameRooms.set(roomId, {
         white: ws,
         black: null,
         spectators: [],
-        gameState: {
-            fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
-            moves: []
-        }
+        gameState: { fen: START_FEN, moves: [] }
     });
-    
     ws.roomId = roomId;
     ws.color = 'white';
-    
-    console.log('Room created:', roomId);
-    ws.send(JSON.stringify({
-        type: 'room_created',
-        roomId: roomId,
-        color: 'white'
-    }));
+    ws.isSpectator = false;
+    send(ws, { type: 'room_created', roomId: roomId, color: 'white' });
+    broadcastPlayerList();
 }
 
 function handleJoinRoom(ws, data) {
-    const roomId = data.roomId;
-    console.log('Joining room:', roomId);
-    
+    if (!isRegistered(ws)) return sendError(ws, 'Enter the lobby with your name first.');
+    if (playerBusy(ws)) return sendError(ws, 'Leave your current room before joining another.');
+    const roomId = typeof data.roomId === 'string' ? data.roomId.trim().toUpperCase() : '';
     const room = gameRooms.get(roomId);
-    
-    if (!room) {
-        console.log('Room not found:', roomId);
-        ws.send(JSON.stringify({
-            type: 'error',
-            message: 'Room not found'
-        }));
-        return;
-    }
-    
+    if (!room) return sendError(ws, 'Room not found. Check the room ID and try again.');
+    if (room.white === ws || room.black === ws) return sendError(ws, 'You are already in this room.');
+
     if (!room.black) {
         room.black = ws;
         ws.roomId = roomId;
         ws.color = 'black';
-        
-        console.log('Black player joined room:', roomId);
-        
-        // Notify both players that game can start
-        room.white.send(JSON.stringify({
-            type: 'game_start',
-            roomId: roomId,
-            color: 'white',
-            fen: room.gameState.fen
-        }));
-        
-        ws.send(JSON.stringify({
-            type: 'game_start',
-            roomId: roomId,
-            color: 'black',
-            fen: room.gameState.fen
-        }));
+        ws.isSpectator = false;
+        send(room.white, { type: 'game_start', roomId: roomId, color: 'white', fen: room.gameState.fen, opponent: room.black.playerName });
+        send(ws, { type: 'game_start', roomId: roomId, color: 'black', fen: room.gameState.fen, opponent: room.white.playerName });
     } else {
-        // Add as spectator
         room.spectators.push(ws);
         ws.roomId = roomId;
         ws.isSpectator = true;
-        
-        console.log('Spectator joined room:', roomId);
-        ws.send(JSON.stringify({
-            type: 'spectate_start',
-            roomId: roomId,
-            fen: room.gameState.fen
-        }));
+        send(ws, { type: 'spectate_start', roomId: roomId, fen: room.gameState.fen });
     }
+    broadcastPlayerList();
+}
+
+function handleChallengePlayer(ws, data) {
+    if (!isRegistered(ws)) return sendError(ws, 'Enter the lobby with your name first.');
+    if (playerBusy(ws)) return sendError(ws, 'Leave your current room before challenging someone.');
+    const targetId = typeof data.targetPlayerId === 'string' ? data.targetPlayerId : '';
+    const target = onlinePlayers.get(targetId);
+    if (!target || target.ws.readyState !== WebSocket.OPEN) return sendError(ws, 'That player is no longer online.');
+    if (target.ws === ws) return sendError(ws, 'You cannot challenge yourself.');
+    if (playerBusy(target.ws)) return sendError(ws, 'That player is currently in a room.');
+    if (findPendingChallengeFor(ws.playerId) || findPendingChallengeFor(targetId)) {
+        return sendError(ws, 'One of you already has a pending challenge. Please try again shortly.');
+    }
+
+    const challengeId = crypto.randomBytes(12).toString('hex');
+    const challenge = {
+        id: challengeId,
+        fromId: ws.playerId,
+        toId: targetId,
+        fromWs: ws,
+        toWs: target.ws,
+        timer: null
+    };
+    challenge.timer = setTimeout(function () {
+        removeChallenge(challengeId, 'challenge_expired', 'Challenge expired.');
+    }, CHALLENGE_TIMEOUT_MS);
+    challenges.set(challengeId, challenge);
+
+    send(ws, { type: 'challenge_sent', challengeId: challengeId, targetName: target.name });
+    send(target.ws, {
+        type: 'incoming_challenge',
+        challengeId: challengeId,
+        fromPlayerId: ws.playerId,
+        fromName: ws.playerName,
+        expiresIn: CHALLENGE_TIMEOUT_MS
+    });
+}
+
+function handleAcceptChallenge(ws, data) {
+    const challenge = challenges.get(data.challengeId);
+    if (!challenge || challenge.toWs !== ws) return sendError(ws, 'That challenge is no longer available.');
+    if (!isRegistered(challenge.fromWs) || !isRegistered(challenge.toWs) ||
+        challenge.fromWs.readyState !== WebSocket.OPEN || challenge.toWs.readyState !== WebSocket.OPEN ||
+        playerBusy(challenge.fromWs) || playerBusy(challenge.toWs)) {
+        removeChallenge(challenge.id, 'challenge_expired', 'A player is no longer available.');
+        return sendError(ws, 'A player is no longer available for this match.');
+    }
+    clearTimeout(challenge.timer);
+    challenges.delete(challenge.id);
+    startChallengeMatch(challenge);
+}
+
+function handleDeclineChallenge(ws, data) {
+    const challenge = challenges.get(data.challengeId);
+    if (!challenge || challenge.toWs !== ws) return sendError(ws, 'That challenge is no longer available.');
+    removeChallenge(challenge.id, 'challenge_declined', ws.playerName + ' declined the challenge.');
+}
+
+function getRoomForPlayer(ws) {
+    if (!isRegistered(ws) || !ws.roomId) return null;
+    const room = gameRooms.get(ws.roomId);
+    if (!room || (room.white !== ws && room.black !== ws && !room.spectators.includes(ws))) return null;
+    return room;
 }
 
 function handleMove(ws, data) {
-    const room = gameRooms.get(ws.roomId);
-    if (!room) {
-        console.log('Room not found for move:', ws.roomId);
-        return;
-    }
-    
-    // Update game state
+    const room = getRoomForPlayer(ws);
+    if (!room || ws.isSpectator || (ws !== room.white && ws !== room.black)) return sendError(ws, 'You cannot move in this room.');
+    if (typeof data.fen !== 'string' || !data.move || typeof data.move !== 'object') return sendError(ws, 'Invalid move payload.');
     room.gameState.fen = data.fen;
     room.gameState.moves.push(data.move);
-    
-    console.log('Move made in room', ws.roomId, ':', data.move);
-    
-    // Broadcast move to all players in room
-    const moveData = JSON.stringify({
-        type: 'move_made',
-        move: data.move,
-        fen: data.fen
-    });
-    
-    if (room.white) room.white.send(moveData);
-    if (room.black) room.black.send(moveData);
-    room.spectators.forEach(spectator => spectator.send(moveData));
+    const payload = { type: 'move_made', move: data.move, fen: data.fen };
+    send(room.white, payload);
+    send(room.black, payload);
+    room.spectators.forEach(function (spectator) { send(spectator, payload); });
 }
 
 function handleGameOver(ws, data) {
-    const room = gameRooms.get(ws.roomId);
-    if (!room) return;
-    
-    console.log('Game over in room', ws.roomId, ':', data.result);
-    
-    const gameOverData = JSON.stringify({
-        type: 'game_over',
-        result: data.result
-    });
-    
-    if (room.white) room.white.send(gameOverData);
-    if (room.black) room.black.send(gameOverData);
-    room.spectators.forEach(spectator => spectator.send(gameOverData));
+    const room = getRoomForPlayer(ws);
+    if (!room || ws.isSpectator) return sendError(ws, 'You are not an active player in this room.');
+    const payload = { type: 'game_over', result: String(data.result || 'Game over') };
+    send(room.white, payload);
+    send(room.black, payload);
+    room.spectators.forEach(function (spectator) { send(spectator, payload); });
+}
+
+function handleChatMessage(ws, data) {
+    const room = getRoomForPlayer(ws);
+    if (!room || ws.isSpectator || (ws !== room.white && ws !== room.black)) return sendError(ws, 'Join a game before sending chat messages.');
+    const message = typeof data.message === 'string' ? data.message.trim() : '';
+    if (!message || message.length > 500) return sendError(ws, 'Chat messages must be 1–500 characters.');
+    const payload = {
+        type: 'chat_message',
+        message: message,
+        sender: ws.playerName || 'Player',
+        playerId: ws.playerId
+    };
+    const opponent = ws === room.white ? room.black : room.white;
+    send(opponent, payload);
+}
+
+function handleOfferDraw(ws, data) {
+    const room = getRoomForPlayer(ws);
+    if (!room || ws.isSpectator || (ws !== room.white && ws !== room.black)) return sendError(ws, 'You are not an active player in this room.');
+    const opponent = ws === room.white ? room.black : room.white;
+    if (!opponent) return sendError(ws, 'Your opponent has not joined yet.');
+    send(opponent, { type: 'draw_offer', fromColor: ws.color, fromName: ws.playerName });
+}
+
+function handleDrawResponse(ws, data) {
+    const room = getRoomForPlayer(ws);
+    if (!room || ws.isSpectator || (ws !== room.white && ws !== room.black)) return sendError(ws, 'You are not an active player in this room.');
+    const opponent = ws === room.white ? room.black : room.white;
+    if (!opponent) return sendError(ws, 'Your opponent has not joined yet.');
+    send(opponent, { type: 'draw_response', accepted: Boolean(data.accepted) });
+    if (data.accepted) {
+        const payload = { type: 'game_over', result: 'Draw agreed' };
+        send(room.white, payload);
+        send(room.black, payload);
+        room.spectators.forEach(function (spectator) { send(spectator, payload); });
+        room.white.roomId = null;
+        room.black.roomId = null;
+        gameRooms.delete(ws.roomId);
+        broadcastPlayerList();
+    }
 }
 
 function handlePlayerDisconnect(ws) {
+    if (ws.playerId) {
+        const player = onlinePlayers.get(ws.playerId);
+        if (player && player.ws === ws) onlinePlayers.delete(ws.playerId);
+    }
+
+    for (const challenge of Array.from(challenges.values())) {
+        if (challenge.fromWs === ws || challenge.toWs === ws) {
+            const otherWs = challenge.fromWs === ws ? challenge.toWs : challenge.fromWs;
+            removeChallenge(challenge.id, 'challenge_expired', 'A player disconnected.');
+            send(otherWs, { type: 'player_left', playerName: ws.playerName || 'A player' });
+        }
+    }
+
     const roomId = ws.roomId;
-    if (!roomId) return;
-    
-    const room = gameRooms.get(roomId);
-    if (!room) return;
-    
-    console.log('Player disconnected from room:', roomId);
-    
-    // Notify other player about disconnection
-    const disconnectData = JSON.stringify({
-        type: 'player_disconnected',
-        color: ws.color
-    });
-    
-    if (ws === room.white) {
-        room.white = null;
-        if (room.black) room.black.send(disconnectData);
-    } else if (ws === room.black) {
-        room.black = null;
-        if (room.white) room.white.send(disconnectData);
-    } else {
-        // Remove spectator
-        room.spectators = room.spectators.filter(spec => spec !== ws);
+    if (roomId) {
+        const room = gameRooms.get(roomId);
+        if (room) {
+            const payload = { type: 'player_disconnected', color: ws.color };
+            if (ws === room.white) {
+                room.white = null;
+                send(room.black, payload);
+            } else if (ws === room.black) {
+                room.black = null;
+                send(room.white, payload);
+            } else {
+                room.spectators = room.spectators.filter(function (spectator) { return spectator !== ws; });
+            }
+            if (!room.white && !room.black && room.spectators.length === 0) gameRooms.delete(roomId);
+        }
     }
-    
-    // If both players are gone and no spectators, remove the room
-    if (!room.white && !room.black && room.spectators.length === 0) {
-        console.log('Removing empty room:', roomId);
-        gameRooms.delete(roomId);
-    }
+    broadcastPlayerList();
 }
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
+server.listen(PORT, function () {
+    console.log('Chessify test lobby server listening on port ' + PORT);
 });

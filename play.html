@@ -168,6 +168,11 @@
             background: transparent !important;
         }
 
+        .board-container {
+            width: 100%;
+            max-width: 700px;
+            margin: 0 auto;
+            padding: 0;
         .game-section {
             background: transparent;
         }
@@ -244,6 +249,39 @@
             background: transparent;
         }
 
+        /* Keep the board in view while the game-info sidebar scrolls independently. */
+        #gameArea {
+            align-items: flex-start;
+        }
+
+        #gameArea > .col-md-8 {
+            position: sticky;
+            top: 88px;
+            align-self: flex-start;
+        }
+
+        #gameArea > .col-md-4 {
+            position: sticky;
+            top: 88px;
+            align-self: flex-start;
+            max-height: calc(100vh - 108px);
+            overflow-y: auto;
+            overflow-x: hidden;
+            overscroll-behavior: contain;
+            scrollbar-width: thin;
+            scrollbar-color: rgba(148, 163, 184, 0.35) transparent;
+            padding-right: 10px;
+            border-radius: 12px;
+        }
+
+        #gameArea > .col-md-4::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        #gameArea > .col-md-4::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
         #gameArea > .col-md-4::-webkit-scrollbar-thumb {
             background: rgba(148, 163, 184, 0.3);
             border-radius: 999px;
@@ -263,6 +301,17 @@
             backdrop-filter: blur(12px);
         }
 
+        @media (max-width: 767.98px) {
+            #gameArea > .col-md-8,
+            #gameArea > .col-md-4 {
+                position: static;
+                max-height: none;
+                overflow: visible;
+                padding-right: calc(var(--bs-gutter-x) * 0.5);
+            }
+
+            .board-container {
+                max-width: min(100%, 700px);
         /* Tablet & Mobile Fallback */
         @media (max-width: 991.98px) {
             .board-container {

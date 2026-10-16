@@ -40,6 +40,7 @@
             grid-template-columns: repeat(8, 1fr);
             grid-template-rows: repeat(8, 1fr);
             width: 100%;
+            max-width: none !important;
             aspect-ratio: 1 / 1;
             border: 0 !important;
             outline: 0;
@@ -166,8 +167,8 @@
 
         .board-container {
             width: 100%;
-            max-width: 700px;
-            margin: 0 auto;
+            max-width: none;
+            margin: 0;
             padding: 0;
             background: transparent;
             border: 0 !important;
@@ -179,29 +180,38 @@
             background: transparent;
         }
 
-        /* Keep the board in view while the game-info sidebar scrolls independently. */
+        /* A true viewport-fixed board: sidebar scrolling cannot move or resize it. */
         #gameArea {
             align-items: flex-start;
         }
 
         #gameArea > .col-md-8 {
-            position: sticky;
-            top: 88px;
-            align-self: flex-start;
+            position: fixed;
+            top: 92px;
+            left: clamp(16px, calc((100vw - 1320px) / 2), 80px);
+            width: min(calc(100vw - 440px), 860px, calc(100vh - 175px));
+            max-width: none;
+            padding: 0 !important;
+            margin: 0 !important;
+            z-index: 20;
         }
 
         #gameArea > .col-md-4 {
-            position: sticky;
+            position: fixed;
             top: 88px;
-            align-self: flex-start;
+            right: clamp(16px, calc((100vw - 1320px) / 2), 80px);
+            width: clamp(300px, 26vw, 360px);
+            max-width: none;
             max-height: calc(100vh - 108px);
             overflow-y: auto;
             overflow-x: hidden;
             overscroll-behavior: contain;
             scrollbar-width: thin;
             scrollbar-color: rgba(148, 163, 184, 0.35) transparent;
-            padding-right: 10px;
+            padding: 0 8px 0 0 !important;
+            margin: 0 !important;
             border-radius: 12px;
+            z-index: 30;
         }
 
         #gameArea > .col-md-4::-webkit-scrollbar {
@@ -229,17 +239,27 @@
             backdrop-filter: blur(12px);
         }
 
-        @media (max-width: 767.98px) {
+        @media (min-width: 768px) {
+            #gameArea {
+                min-height: calc(100vh - 120px);
+            }
+        }
+
+        @media (max-width: 991.98px) {
             #gameArea > .col-md-8,
             #gameArea > .col-md-4 {
                 position: static;
+                width: 100%;
+                max-width: none;
                 max-height: none;
                 overflow: visible;
-                padding-right: calc(var(--bs-gutter-x) * 0.5);
+                padding-right: calc(var(--bs-gutter-x) * 0.5) !important;
+                margin-bottom: 1.5rem !important;
             }
 
             .board-container {
                 max-width: min(100%, 700px);
+                margin: 0 auto;
             }
 
             #board {

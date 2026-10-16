@@ -515,7 +515,7 @@ $(document).ready(() => {
 
     $('#enterLobby').click(() => {
         if (!isConnected) return showError('Not connected to the test lobby server.');
-        const name = String($('#playerName').val() || '').trim().replace(/\\s+/g, ' ');
+        const name = String($('#playerName').val() || '').trim().replace(/\s+/g, ' ');
         if (name.length < 2 || name.length > 20) return showError('Enter a display name between 2 and 20 characters.');
         if (isRegistered) return;
         ws.send(JSON.stringify({ type: 'register_player', name: name }));
@@ -553,8 +553,6 @@ $(document).ready(() => {
             roomId: roomId
         }));
 
-        currentRoom = roomId;
-        $('#currentRoom').text(roomId);
     });
 
     // Join room button click handler
@@ -575,8 +573,6 @@ $(document).ready(() => {
             roomId: roomId
         }));
 
-        currentRoom = roomId;
-        $('#currentRoom').text(roomId);
     });
 
     // Resign button click handler

@@ -362,6 +362,36 @@
             font-size: 1.2rem;
             color: #fff;
         }
+            .lobby-panel {
+            margin-top: 16px;
+            padding: 14px;
+            border: 1px solid rgba(148, 163, 184, 0.18);
+            border-radius: 12px;
+            background: rgba(15, 23, 42, 0.72);
+            text-align: left;
+        }
+        .lobby-panel h6 { color: #7dd3fc; font-weight: 700; margin-bottom: 10px; }
+        .lobby-identity { color: #94a3b8; font-size: .82rem; margin-bottom: 10px; }
+        .lobby-player-list { display: flex; flex-direction: column; gap: 8px; max-height: 260px; overflow-y: auto; }
+        .lobby-player { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px; border-radius: 9px; background: rgba(30, 41, 59, .7); }
+        .lobby-player-details { min-width: 0; display: grid; grid-template-columns: 8px minmax(0,1fr); gap: 3px 8px; align-items: center; }
+        .lobby-dot { width: 7px; height: 7px; border-radius: 50%; background: #64748b; grid-row: span 2; }
+        .lobby-dot.is-online { background: #34d399; box-shadow: 0 0 9px rgba(52,211,153,.5); }
+        .lobby-dot.is-busy { background: #fbbf24; }
+        .lobby-player-name { color: #e2e8f0; font-size: .9rem; font-weight: 600; overflow-wrap: anywhere; }
+        .lobby-player-state { color: #94a3b8; font-size: .72rem; }
+        .lobby-challenge { flex-shrink: 0; }
+        .lobby-empty { color: #94a3b8; font-size: .85rem; padding: 8px 2px; }
+        #incomingChallenge[hidden] { display: none !important; }
+        #incomingChallenge { position: fixed; z-index: 2000; top: calc(var(--navbar-height) + 16px); left: 50%; transform: translateX(-50%); width: min(92vw, 390px); padding: 18px; border: 1px solid rgba(56,189,248,.38); border-radius: 14px; background: rgba(15,23,42,.97); color: #e2e8f0; box-shadow: 0 20px 70px rgba(0,0,0,.45); }
+        #incomingChallenge .challenge-actions { display: flex; gap: 8px; margin-top: 12px; }
+        #incomingChallenge .challenge-actions button { flex: 1; }
+        #playerName { background: #1e293b !important; color: #f8fafc !important; border: 1px solid rgba(148,163,184,.25) !important; }
+        @media (max-width: 991.98px) {
+            .lobby-player-list { max-height: 220px; }
+            #incomingChallenge { top: 80px; }
+        }
+
     </style>
 </head>
 <body>
@@ -385,6 +415,15 @@
     </div>
   </nav>
 
+    <div id="incomingChallenge" hidden role="dialog" aria-live="polite" aria-label="Incoming chess challenge">
+        <div class="fw-bold mb-2"><i class="fa-solid fa-chess-knight me-2 text-info"></i>Incoming challenge</div>
+        <div><span id="incomingChallengeName">A player</span> wants to play chess with you.</div>
+        <div class="challenge-actions">
+            <button id="acceptChallenge" type="button" class="btn btn-success">Accept</button>
+            <button id="declineChallenge" type="button" class="btn btn-outline-secondary">Decline</button>
+        </div>
+    </div>
+
     <!-- Game Section -->
     <section class="game-section py-5">
         <div class="container">
@@ -395,12 +434,24 @@
                         <div class="card bg-dark text-white border-secondary">
                             <div class="card-body">
                                 <div class="mb-3 text-start">
+                                    <label for="playerName" class="form-label">Your display name</label>
+                                    <div class="input-group">
+                                        <input type="text" id="playerName" class="form-control" maxlength="20" placeholder="Enter a name (2–20 characters)" autocomplete="nickname">
+                                        <button id="enterLobby" type="button" class="btn btn-info">Enter Lobby</button>
+                                    </div>
+                                    <div id="lobbyIdentity" class="lobby-identity mt-2">Connect to the test server, then enter your name.</div>
+                                </div>
+                                <div class="mb-3 text-start">
                                     <label for="roomId" class="form-label">Room ID</label>
                                     <input type="text" class="form-control bg-secondary text-white border-0" id="roomId" placeholder="Enter room ID">
                                 </div>
                                 <div class="d-grid gap-2">
-                                    <button id="createRoom" class="btn btn-primary">Create Room</button>
-                                    <button id="joinRoom" class="btn btn-secondary">Join Room</button>
+                                    <button id="createRoom" class="btn btn-primary" disabled>Create Room</button>
+                                    <button id="joinRoom" class="btn btn-secondary" disabled>Join Room</button>
+                                </div>
+                                <div class="lobby-panel" id="lobbyPanelStart">
+                                    <h6><i class="fa-solid fa-users me-2"></i>Online players</h6>
+                                    <div id="lobbyPlayersStart" class="lobby-player-list"><div class="lobby-empty">Enter the lobby to see online players.</div></div>
                                 </div>
                             </div>
                         </div>
@@ -420,6 +471,10 @@
                 </div>
 
                 <div class="col-md-4">
+                    <div class="lobby-panel mb-3" id="lobbyPanelGame">
+                        <h6><i class="fa-solid fa-users me-2"></i>Online players</h6>
+                        <div id="lobbyPlayersGame" class="lobby-player-list"><div class="lobby-empty">Waiting for lobby connection…</div></div>
+                    </div>
                     <div class="card bg-dark text-white border-secondary">
                         <div class="card-body">
                             <h5 class="card-title text-info mb-3">Game Info</h5>
@@ -1015,14 +1070,8 @@
         window.ChessBoard = window.Chessboard;
     </script>
 
-    <!-- Multiplayer backend script -->
+    <!-- Configure only the test backend here; never point this test branch at the live server. -->
+    <script src="lobby-config.js"></script>
     <script src="multiplayer.js"></script>
-    
-    <script>
-        // Initialize WebSocket connection when page loads
-        $(document).ready(() => {
-            connectToServer();
-        });
-    </script>
 </body>
 </html>
